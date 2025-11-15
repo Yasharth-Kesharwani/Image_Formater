@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Two Plane Mirrors - Image Formation</title>
+<style>
+  body {
+    background: #f3f6f9;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    margin: 0;
+    padding: 20px;
+    color: #333;
+    text-align: center;
+  }
+  h2 {
+    margin-bottom: 10px;
+    color: #222;
+  }
+  label {
+    font-size: 1.05em;
+  }
+  input[type=number] {
+    font-size: 1em;
+    padding: 5px 10px;
+    margin-left: 10px;
+    border: 1.5px solid #ccc;
+    border-radius: 5px;
+    width: 80px;
+    transition: border-color 0.3s ease;
+  }
+  input[type=number]:focus {
+    border-color: #007bff;
+    outline: none;
+  }
+  button {
+    background-color: #007bff;
+    color: white;
+    border: none;
+    padding: 8px 18px;
+    margin-left: 15px;
+    font-weight: bold;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 1em;
+    transition: background-color 0.3s ease;
+  }
+  button:hover {
+    background-color: #0056b3;
+  }
+  #canvas {
+    display: block;
+    margin: 30px auto 5px;
+    border-radius: 12px;
+    box-shadow: 0 8px 15px rgba(0,0,0,0.1);
+    background: white;
+    border: 2.5px solid #007bff;
+    max-width: 680px;
+    width: 100%;
+    height: 480px;
+  }
+  #info {
+    font-weight: 600;
+    font-size: 1.1em;
+    color: #505050;
+    margin-top: 12px;
+  }
+</style>
+</head>
+<body>
+
+<h2>Two Plane Mirrors: Images & Visualization</h2>
+
+<div>
+  <label for="angleInput">Angle between mirrors (°):</label>
+  <input type="number" id="angleInput" min="10" max="170" value="90" />
+  <button onclick="drawMirrors()">Show Images</button>
+</div>
+
+<canvas id="canvas" width="680" height="480"></canvas>
+
+<div id="info">
+  Set angle, click “Show Images”. Click inside the sector for a point object, or drag to create a 1‑D object.
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx    = canvas.getContext('2d');
+
+let points = [];                 // clickable labels (object + images)
+let objectCenter = null;         // center of object (point or segment)
+let objectHalf   = {x: 0, y: 0}; // half-vector for 1D object
+let isDragging   = false;
+let dragStart    = null;
+let suppressNextClick = false;   // ignore click right after placing object
+
+// common radius for both object and image centres
+const POINT_RADIUS = 6;
+
+// degrees → radians
+function degToRad(deg) {
+  return (deg * Math.PI) / 180;
+}
+
+// Image count rule including symmetric / asymmetric placement and non-integer n.
+// Let n = 360/θ and nInt = floor(n).
+// If n integer and even  → images = n - 1  (any placement).
+// If n integer and odd   → images = n   when asymmetric,
+//                          images = n - 1 when symmetric.
+// If n not integer:      → images = nInt   when asymmetric,
+//                          images = nInt - 1 when symmetric and nInt is odd, else nInt.
+function calculateNumberOfImages(angleDeg, isSymmetric) {
+  const n = 360 / angleDeg;
+  const nInt = Math.floor(n);
+
+  if (Number.isInteger(n)) {
+    if (n % 2 === 0) {
+      return n - 1;
+    } else {
+      return isSymmetric ? (n - 1) : n;
+    }
+  } else {
+    if (isSymmetric && (nInt % 2 === 1)) {
+      return Math.max(0, nInt - 1);
+    }
+    return nInt;
+  }
+}
+
+// Reflect point P about line through vertex V with unit direction u
+function reflectAboutLine(px, py, vx, vy, ux, uy) {
+  const wx = px - vx;
+  const wy = py - vy;
+
+  const dot = wx * ux + wy * uy;
+  const px_par = ux * dot;
+  const py_par = uy * dot;
+
+  const px_perp = wx - px_par;
+  const py_perp = wy - py_par;
+
+  const rx = px_par - px_perp;
+  const ry = py_par - py_perp;
+
+  return { x: vx + rx, y: vy + ry };
+}
+
+// Angle between two vectors
+function angleBetween(a, b) {
+  const dot = a.x * b.x + a.y * b.y;
+  const magA = Math.hypot(a.x, a.y);
+  const magB = Math.hypot(b.x, b.y);
+  if (magA === 0 || magB === 0) return 0;
+  let c = dot / (magA * magB);
+  c = Math.max(-1, Math.min(1, c));
+  return Math.acos(c);
+}
+
+// Check if object center is on the angle bisector (symmetric placement)
+function isOnBisector(center, cx, cy, m1Dir, m2Dir) {
+  const v = { x: center.x - cx, y: center.y - cy };
+  const magV = Math.hypot(v.x, v.y);
+  if (magV < 5) return false;
+
+  const bis = { x: m1Dir.x + m2Dir.x, y: m1Dir.y + m2Dir.y };
+  const ang = angleBetween(v, bis);
+  const tol = degToRad(5);
+  return Math.abs(ang) < tol;
+}
+
+// Draw short slanted “silvering” lines on the back side of a mirror
+function drawSilvering(x1, y1, x2, y2, nx, ny) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const len = Math.hypot(dx, dy);
+  if (len === 0) return;
+
+  const ux = dx / len;
+  const uy = dy / len;
+
+  const nLen = Math.hypot(nx, ny) || 1;
+  const unx  = nx / nLen;
+  const uny  = ny / nLen;
+
+  const spacing  = 10;
+  const offset   = 7;
+  const hatchLen = 14;
+  const steps    = Math.floor(len / spacing);
+
+  ctx.strokeStyle = '#777';
+  ctx.lineWidth = 1;
+
+  for (let i = 0; i <= steps; i++) {
+    const bx = x1 + ux * i * spacing;
+    const by = y1 + uy * i * spacing;
+
+    const sx = bx + unx * offset;
+    const sy = by + uny * offset;
+    const ex = sx + ux * hatchLen;
+    const ey = sy + uy * hatchLen;
+
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(ex, ey);
+    ctx.stroke();
+  }
+}
+
+function drawMirrors() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  points = [];
+
+  const angleDeg = Number(document.getElementById('angleInput').value);
+  if (angleDeg < 10 || angleDeg > 170) {
+    alert('Please enter an angle between 10° and 170°.');
+    return;
+  }
+
+  const angleRad = degToRad(angleDeg);
+
+  // Mirror geometry (shorter mirrors, closer to center)
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2 + 60;
+  const mirrorLength = 220;
+
+  const m1Start = { x: cx, y: cy };
+  const m1End   = { x: cx, y: cy - mirrorLength };
+  const m1Dir   = { x: 0, y: -1 };
+
+  const m2Start = { x: cx, y: cy };
+  const m2End   = {
+    x: cx + mirrorLength * Math.sin(angleRad),
+    y: cy - mirrorLength * Math.cos(angleRad)
+  };
+  const m2Dir   = { x: Math.sin(angleRad), y: -Math.cos(angleRad) };
+
+  // Draw mirrors (front surfaces)
+  ctx.lineWidth = 5;
+  ctx.strokeStyle = '#222';
+
+  ctx.beginPath();
+  ctx.moveTo(m1Start.x, m1Start.y);
+  ctx.lineTo(m1End.x, m1End.y);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(m2Start.x, m2Start.y);
+  ctx.lineTo(m2End.x, m2End.y);
+  ctx.stroke();
+
+  // Draw silvering on back sides
+  const backNormalM1 = { x: -1, y: 0 };
+  drawSilvering(m1Start.x, m1Start.y, m1End.x, m1End.y,
+                backNormalM1.x, backNormalM1.y);
+
+  const backNormalM2 = { x: Math.cos(angleRad), y: Math.sin(angleRad) };
+  drawSilvering(m2Start.x, m2Start.y, m2End.x, m2End.y,
+                backNormalM2.x, backNormalM2.y);
+
+  // Default object: point inside sector if none yet
+  if (!objectCenter) {
+    const upAlongM1  = 60;
+    const towardsM2  = 50;
+    objectCenter = {
+      x: m1Start.x + m1Dir.x * upAlongM1 + m2Dir.x * towardsM2,
+      y: m1Start.y + m1Dir.y * upAlongM1 + m2Dir.y * towardsM2
+    };
+    objectHalf = { x: 0, y: 0 }; // point
+  }
+
+  // Compute endpoints of object segment from center and half-vector
+  const objP1 = {
+    x: objectCenter.x - objectHalf.x,
+    y: objectCenter.y - objectHalf.y
+  };
+  const objP2 = {
+    x: objectCenter.x + objectHalf.x,
+    y: objectCenter.y + objectHalf.y
+  };
+
+  // Draw object: segment (if any) plus central point
+  ctx.strokeStyle = '#e63946';
+  ctx.fillStyle   = '#e63946';
+  ctx.lineWidth   = POINT_RADIUS * 2;
+
+  if (Math.hypot(objectHalf.x, objectHalf.y) > 1) {
+    ctx.beginPath();
+    ctx.moveTo(objP1.x, objP1.y);
+    ctx.lineTo(objP2.x, objP2.y);
+    ctx.stroke();
+  }
+
+  ctx.beginPath();
+  ctx.arc(objectCenter.x, objectCenter.y, POINT_RADIUS, 0, 2 * Math.PI);
+  ctx.fill();
+
+  ctx.fillStyle = '#222';
+  ctx.font = '16px Segoe UI, Tahoma, Geneva, Verdana, sans-serif';
+  ctx.fillText('Object', objectCenter.x - 30, objectCenter.y - 15);
+  points.push({ x: objectCenter.x, y: objectCenter.y, label: 'Object' });
+
+  // Decide symmetric or asymmetric based on center
+  const symmetric = isOnBisector(objectCenter, cx, cy, m1Dir, m2Dir);
+  const nImages   = calculateNumberOfImages(angleDeg, symmetric);
+
+  // Multiple reflections via sequences, for segments (two endpoints)
+  const images = [];
+  const cache  = new Map();
+
+  function seqToSegment(seq) {
+    if (cache.has(seq)) return cache.get(seq);
+
+    let p1 = { x: objP1.x, y: objP1.y };
+    let p2 = { x: objP2.x, y: objP2.y };
+
+    for (let i = 0; i < seq.length; i++) {
+      const c = seq[i];
+      if (c === '1') {
+        p1 = reflectAboutLine(p1.x, p1.y, m1Start.x, m1Start.y, m1Dir.x, m1Dir.y);
+        p2 = reflectAboutLine(p2.x, p2.y, m1Start.x, m1Start.y, m1Dir.x, m1Dir.y);
+      } else if (c === '2') {
+        p1 = reflectAboutLine(p1.x, p1.y, m2Start.x, m2Start.y, m2Dir.x, m2Dir.y);
+        p2 = reflectAboutLine(p2.x, p2.y, m2Start.x, m2Start.y, m2Dir.x, m2Dir.y);
+      }
+    }
+
+    const center = {
+      x: (p1.x + p2.x) / 2,
+      y: (p1.y + p2.y) / 2
+    };
+
+    const result = { p1, p2, center, seq };
+    cache.set(seq, result);
+    return result;
+  }
+
+  function closeToImages(p, arr) {
+    return arr.some(q => Math.hypot(p.x - q.center.x, p.y - q.center.y) < 3);
+  }
+
+  function closeToObjectCenter(p) {
+    return Math.hypot(p.x - objectCenter.x, p.y - objectCenter.y) < 3;
+  }
+
+  const queue    = ['1', '2'];
+  const maxDepth = 10;
+
+  while (queue.length > 0 && images.length < nImages) {
+    const seq = queue.shift();
+    if (seq.length > maxDepth) continue;
+
+    const seg = seqToSegment(seq);
+
+    const n    = 360 / angleDeg;
+    const nInt = Math.floor(n);
+    const symmetricOddInt = symmetric && (nInt % 2 === 1);
+
+    if (symmetricOddInt && closeToObjectCenter(seg.center)) {
+      // skip overlapping central image
+    } else if (!closeToImages(seg.center, images)) {
+      images.push(seg);
+    }
+
+    if (images.length < nImages) {
+      const last = seq[seq.length - 1];
+      if (last !== '1') queue.push(seq + '1');
+      if (last !== '2') queue.push(seq + '2');
+    }
+  }
+
+  // Draw images: lines plus small dot at center, label I1, I2 on diagram
+  ctx.strokeStyle = '#1d3557';
+  ctx.fillStyle   = '#1d3557';
+  ctx.lineWidth   = POINT_RADIUS * 2;
+  ctx.font        = '15px Segoe UI, Tahoma, Geneva, Verdana, sans-serif';
+
+  images.forEach((img, idx) => {
+    // segment
+    if (Math.hypot(img.p2.x - img.p1.x, img.p2.y - img.p1.y) > 1) {
+      ctx.beginPath();
+      ctx.moveTo(img.p1.x, img.p1.y);
+      ctx.lineTo(img.p2.x, img.p2.y);
+      ctx.stroke();
+    }
+
+    // center dot
+    ctx.beginPath();
+    ctx.arc(img.center.x, img.center.y, POINT_RADIUS, 0, 2 * Math.PI);
+    ctx.fill();
+
+    const drawLabel  = 'I' + (idx + 1);
+    const clickLabel = 'Image ' + (idx + 1);
+
+    ctx.fillText(drawLabel, img.center.x + 10, img.center.y + 5);
+    points.push({ x: img.center.x, y: img.center.y, label: clickLabel });
+  });
+
+  // Clean output text
+  const placementText = symmetric ? 'symmetrically placed' : 'asymmetrically placed';
+  document.getElementById('info').textContent =
+    `Number of images formed: ${nImages} (${placementText}).`;
+}
+
+// Check if a point lies inside a slightly enlarged circular sector
+function isInsideWedge(x, y, angleDeg) {
+  const angleRad = degToRad(angleDeg);
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2 + 60;
+  const mirrorLength = 220;
+  const maxR = mirrorLength * 1.25;
+
+  const v = { x: x - cx, y: y - cy };
+  const r = Math.hypot(v.x, v.y);
+  if (r < 5 || r > maxR) return false;
+
+  const m1Dir = { x: 0, y: -1 };
+  const m2Dir = { x: Math.sin(angleRad), y: -Math.cos(angleRad) };
+
+  function cross(a, b) {
+    return a.x * b.y - a.y * b.x;
+  }
+
+  const c1   = cross(m1Dir, v);
+  const c2   = cross(m2Dir, v);
+  const dot1 = v.x * m1Dir.x + v.y * m1Dir.y;
+  const dot2 = v.x * m2Dir.x + v.y * m2Dir.y;
+
+  return (c1 > 0 && c2 < 0 && (dot1 > 0 || dot2 > 0));
+}
+
+// Click handler: show label (placement uses mousedown/mousemove/mouseup)
+canvas.addEventListener('click', (evt) => {
+  // Ignore the first click after placing/dragging the object
+  if (suppressNextClick) {
+    suppressNextClick = false;
+    return;
+  }
+
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width  / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const xClick = (evt.clientX - rect.left) * scaleX;
+  const yClick = (evt.clientY - rect.top)  * scaleY;
+
+  const radius = POINT_RADIUS + 4;
+  for (const pt of points) {
+    const dx = pt.x - xClick;
+    const dy = pt.y - yClick;
+    if (Math.hypot(dx, dy) < radius) {
+      document.getElementById('info').textContent = `Clicked: ${pt.label}`;
+      return;
+    }
+  }
+});
+
+// Mouse events for creating point / segment object
+canvas.addEventListener('mousedown', (evt) => {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width  / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const x = (evt.clientX - rect.left) * scaleX;
+  const y = (evt.clientY - rect.top)  * scaleY;
+
+  const angleDeg = Number(document.getElementById('angleInput').value);
+  if (angleDeg < 10 || angleDeg > 170) return;
+
+  if (isInsideWedge(x, y, angleDeg)) {
+    isDragging = true;
+    dragStart = { x, y };
+    objectCenter = { x, y };
+    objectHalf   = { x: 0, y: 0 };  // start as point
+    suppressNextClick = true;       // ignore the click that ends this placement
+    drawMirrors();
+  }
+});
+
+canvas.addEventListener('mousemove', (evt) => {
+  if (!isDragging) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width  / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const x = (evt.clientX - rect.left) * scaleX;
+  const y = (evt.clientY - rect.top)  * scaleY;
+
+  const angleDeg = Number(document.getElementById('angleInput').value);
+  if (!isInsideWedge(x, y, angleDeg)) return;
+
+  const mid  = { x: (dragStart.x + x) / 2, y: (dragStart.y + y) / 2 };
+  const half = { x: (x - dragStart.x) / 2, y: (y - dragStart.y) / 2 };
+
+  objectCenter = mid;
+  objectHalf   = half;
+  drawMirrors();
+});
+
+canvas.addEventListener('mouseup', () => {
+  isDragging = false;
+});
+
+// Initial draw
+drawMirrors();
+</script>
+
+</body>
+</html>
+
